@@ -17,9 +17,9 @@ dotenv.config();
 // Simple logger utility
 const isProduction = process.env.NODE_ENV === 'production';
 const logger = {
-  log: (...args) => { if (!isProduction) console.log(...args); },
-  error: (...args) => { if (!isProduction) console.error(...args); },
-  warn: (...args) => { if (!isProduction) console.warn(...args); }
+  log: (...args) => { console.log(...args); },
+  error: (...args) => { console.error(...args); },
+  warn: (...args) => { console.warn(...args); }
 };
 
 // Ensure required environment variables are set
@@ -37,32 +37,159 @@ if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !pr
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const connectDB = async () => {
-    try {
-        await mongoose.connect(process.env.MONGODB_URI);
-        logger.log('MongoDB connected successfully');
-    } catch (error) {
-        logger.error('MongoDB connection error:', error);
-        process.exit(1);
+// Create the Express app
+const app = express();
+
+// Database connection with retry mechanism
+const connectDB = async (retries = 5, interval = 5000) => {
+    let connectionAttempt = 0;
+    
+    while (connectionAttempt < retries) {
+        try {
+            await mongoose.connect(process.env.MONGODB_URI);
+            logger.log('MongoDB connected successfully');
+            return;
+        } catch (error) {
+            connectionAttempt++;
+            logger.error(`MongoDB connection attempt ${connectionAttempt} failed:`, error.message);
+            
+            if (connectionAttempt >= retries) {
+                logger.error('Maximum MongoDB connection attempts reached. Exiting...');
+                process.exit(1);
+            }
+            
+            logger.log(`Retrying in ${interval / 1000} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, interval));
+        }
     }
 };
-
-const app = express();
-connectDB();
 
 // Harden CORS settings for production
 const corsOptions = isProduction
   ? { origin: process.env.FRONTEND_URL, credentials: true }
   : { origin: true, credentials: true };
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Protect admin routes
+// Root route
+app.get('/', (req, res) => {
+  res.json({ message: 'SellMyPi API is running!' });
+});
+
+// Health check endpoint for Railway
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// API routes
 app.use('/api/users', ClerkExpressRequireAuth(), userRoutes);
 app.use('/api/transactions', transactionRoutes);
-app.use('/api/cloudinary', ClerkExpressRequireAuth(), cloudinaryRoutes); // Protect Cloudinary routes
+app.use('/api/cloudinary', ClerkExpressRequireAuth(), cloudinaryRoutes);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    logger.log(`Server is running on port ${PORT}`);
+// 404 handler
+app.use((req, res, next) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Route ${req.method} ${req.url} not found`
+  });
 });
+
+// Global error handler
+app.use((err, req, res, next) => {
+  logger.error('Unhandled error:', err);
+  
+  const statusCode = err.statusCode || 500;
+  const response = {
+    error: err.name || 'Internal Server Error',
+    message: err.message || 'Something went wrong',
+    status: statusCode
+  };
+  
+  // Only include stack trace in development
+  if (!isProduction) {
+    response.stack = err.stack;
+  }
+  
+  res.status(statusCode).json(response);
+});
+
+// Start server
+let server;
+const PORT = process.env.PORT || 3000;
+
+const startServer = async () => {
+  try {
+    await connectDB();
+    
+    server = app.listen(PORT, () => {
+      logger.log(`Server is running on port ${PORT}`);
+      logger.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    });
+    
+    // Handle server errors
+    server.on('error', (error) => {
+      logger.error('Server error:', error);
+      if (error.code === 'EADDRINUSE') {
+        logger.error(`Port ${PORT} is already in use. Trying again...`);
+        setTimeout(() => {
+          server.close();
+          server.listen(PORT);
+        }, 1000);
+      } else {
+        process.exit(1);
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+// Graceful shutdown
+const gracefulShutdown = async (signal) => {
+  logger.log(`Received ${signal}. Shutting down gracefully...`);
+  
+  if (server) {
+    server.close(() => {
+      logger.log('HTTP server closed.');
+      
+      // Close MongoDB connection
+      mongoose.connection.close(false, () => {
+        logger.log('MongoDB connection closed.');
+        process.exit(0);
+      });
+      
+      // Force exit after 10 seconds
+      setTimeout(() => {
+        logger.error('Forced shutdown after timeout');
+        process.exit(1);
+      }, 10000);
+    });
+  } else {
+    process.exit(0);
+  }
+};
+
+// Handle process events
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions and rejections
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught Exception:', error);
+  gracefulShutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Continue running in this case, but log the event
+});
+
+// Start the server
+startServer();
