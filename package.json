@@ -5,7 +5,9 @@
     "scripts": {
       "start": "node server.js",
       "dev": "nodemon server.js",
-      "install:prod": "npm install --omit=dev"
+      "install:prod": "npm install --omit=dev",
+      "build": "echo 'Build completed'",
+      "prebuild": "echo 'omit=dev' > .npmrc"
     },
     "dependencies": {
       "@clerk/clerk-sdk-node": "^4.13.23",
