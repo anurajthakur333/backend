@@ -34,24 +34,75 @@ if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !pr
   process.exit(1);
 }
 
+// Validate MongoDB URI
+if (!process.env.MONGODB_URI) {
+  logger.error('MONGODB_URI is required but not set in environment variables');
+  process.exit(1);
+}
+
+// Validate MongoDB URI format
+const validateMongoDbUri = (uri) => {
+  const standardFormat = /^mongodb:\/\/.+/;
+  const srvFormat = /^mongodb\+srv:\/\/.+/;
+  
+  if (!standardFormat.test(uri) && !srvFormat.test(uri)) {
+    logger.error('Invalid MONGODB_URI format. Must start with mongodb:// or mongodb+srv://');
+    return false;
+  }
+  
+  // Minimal validation to catch obvious errors
+  if (uri.includes('!') || uri.includes(' ')) {
+    logger.error('MONGODB_URI contains invalid characters');
+    return false;
+  }
+  
+  return true;
+};
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Create the Express app
 const app = express();
 
-// Database connection with retry mechanism
+// Database connection with retry mechanism and better error handling
 const connectDB = async (retries = 5, interval = 5000) => {
     let connectionAttempt = 0;
     
+    // Validate the URI before attempting connection
+    if (!validateMongoDbUri(process.env.MONGODB_URI)) {
+      logger.error('MongoDB connection failed: Invalid connection string format');
+      logger.error('Example formats:');
+      logger.error('  - Standard: mongodb://username:password@hostname:port/database');
+      logger.error('  - Atlas: mongodb+srv://username:password@cluster.mongodb.net/database');
+      process.exit(1);
+    }
+    
     while (connectionAttempt < retries) {
         try {
-            await mongoose.connect(process.env.MONGODB_URI);
+            await mongoose.connect(process.env.MONGODB_URI, {
+                // These options help with connection stability
+                // and are recommended for production
+                serverSelectionTimeoutMS: 5000,
+                socketTimeoutMS: 45000,
+            });
             logger.log('MongoDB connected successfully');
             return;
         } catch (error) {
             connectionAttempt++;
-            logger.error(`MongoDB connection attempt ${connectionAttempt} failed:`, error.message);
+            
+            // Provide more specific error messages based on the error type
+            if (error.name === 'MongoServerSelectionError') {
+                logger.error(`MongoDB server selection failed (attempt ${connectionAttempt}/${retries}): ${error.message}`);
+                logger.error('This usually means the MongoDB server is unreachable. Check your connection string and network.');
+            } else if (error.name === 'MongoParseError') {
+                logger.error(`MongoDB connection string parse error: ${error.message}`);
+                logger.error('Your MONGODB_URI environment variable is likely malformed.');
+                // Exit immediately for connection string errors since retrying won't help
+                process.exit(1);
+            } else {
+                logger.error(`MongoDB connection attempt ${connectionAttempt} failed: ${error.message}`);
+            }
             
             if (connectionAttempt >= retries) {
                 logger.error('Maximum MongoDB connection attempts reached. Exiting...');
