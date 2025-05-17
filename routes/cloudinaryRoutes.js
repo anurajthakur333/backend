@@ -25,8 +25,8 @@ const extractCloudinaryInfo = (url) => {
       const cloudNameMatch = url.match(/cloudinary\.com\/([^/]+)/);
       const cloudName = cloudNameMatch ? cloudNameMatch[1] : null;
 
-      // Extract public_id from URL
-      const publicIdMatch = url.match(/\/upload\/(?:v\d+\/)?(.+?)\.[^.]+$/);
+      // Improved public_id extraction (handles folders and transformations)
+      const publicIdMatch = url.match(/\/upload\/(?:[^/]+\/)*v\d+\/(.+?)\.[^.]+$/);
       const publicId = publicIdMatch ? publicIdMatch[1] : null;
 
       return { public_id: publicId, cloud_name: cloudName };
