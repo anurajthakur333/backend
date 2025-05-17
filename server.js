@@ -55,6 +55,12 @@ mongoose.connect(process.env.MONGODB_URI)
 app.get('/', (req, res) => res.json({ message: 'SellMyPi API is running!' }));
 app.get('/health', (req, res) => res.json({ status: 'healthy' }));
 
+// Log Authorization header for every request (for debugging Clerk auth issues)
+app.use((req, res, next) => {
+  console.log('Authorization header:', req.headers.authorization);
+  next();
+});
+
 // API routes
 app.use('/api/users', ClerkExpressRequireAuth(), userRoutes);
 app.use('/api/transactions', transactionRoutes);
